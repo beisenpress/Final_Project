@@ -1,0 +1,37 @@
+---
+title: " Digital and Algorithmic Marketing - Final Project"
+author: "Ben Eisenpress, Stefano Grioni, Wendy Lue, Dan Tuller"
+date: \today
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(knitr)
+        
+# Set working directory
+
+if(grepl("Stefano",Sys.info()["nodename"])) #Stefano's laptop
+{
+    setwd('/Users/stefano/Google Drive/1 Booth/2 Lectures/Digital Algo Marketing/37304 Digital and Algorithmic Marketing/Assignment 4 (Group)')
+}else if(grepl("BENS-XPS13",Sys.info()["nodename"])) #Ben's laptop
+{
+    setwd("C:/Users/ben/Dropbox/Chicago Booth/37304 Digital Marketing/Final Project/Final_Project")
+}else
+{
+  setwd("C:/Users/dtull/OneDrive/Documents/Booth/Q6 Classes/Digital and Algorithmic Marketing (37304-01)/Assignment 4 (Group)")
+}
+
+```
+
+
+```{r load}
+load(file = "DT.rdata")
+load(file = "Validation.rdata")
+dt_model <- model.matrix(~director_name, data = dt)
+
+```
+

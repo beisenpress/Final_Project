@@ -1,0 +1,332 @@
+---
+title: " Digital and Algorithmic Marketing - Final Project"
+author: "Ben Eisenpress, Stefano Grioni, Wendy Lue, Dan Tuller"
+date: \today
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE, eval = TRUE,
+                      fig.width = 6, fig.height = 4.5, fig.align = "right")
+
+wd = ''
+if(grepl("stefano",Sys.info()["user"])) #Stefano's laptop
+{
+    wd ='/Users/stefano/Google Drive/1 Booth/2 Lectures/Digital Algo Marketing/37304 Digital and Algorithmic Marketing/Final Project'
+}else
+{
+  wd = "C:/Users/dtull/OneDrive/Documents/Booth/Q6 Classes/Digital and Algorithmic Marketing (37304-01)/Final Project"
+}
+setwd(wd)
+
+ifrm <- function(obj, env = globalenv()) {
+    obj <- deparse(substitute(obj))
+    if(exists(obj, envir = env)) {
+        rm(list = obj, envir = env)
+    }
+}
+```
+
+```{r, include = FALSE}
+library(knitr)
+library(data.table)
+library(ggplot2)
+library(stargazer)
+library(gamlr)
+library(glmnet)
+library(ranger)
+library(text2vec)
+
+NFolds = 10 # Number of folds in elastic net
+alpha_incr = 0.1 # increment of alpha for elastic net (default is 0.01)
+num_trees = 10 # number of trees
+```
+
+```{r dataload, include = FALSE}
+set.seed(2017)
+if(!file.exists("./Data/Validation.RData") | !file.exists("./Data/DT.RData"))
+{
+  # reads initial data set
+  movies = read.csv(file="./Data/movie_metadata.csv",head=TRUE,sep=",")
+  
+  dt = data.table(movies)
+  dt[, PIK := .I] # adds primary key to make sure that we don't lose records along the way
+  
+  summary(dt)
+  
+  # get rid of rows with empty fields
+  dt = dt[complete.cases(dt)]
+  dt = dt[plot_keywords != ""]
+  
+  # creates training and prediction data set
+  percentage = 0.8 # 80% of data will be used for training
+  dt[, train := rbinom(nrow(dt), 1, percentage)]
+  validation = dt[train==0,][, -c("train")]
+  dt = dt[train==1,][, -c("train")]
+  
+  save(validation, file="./Data/Validation.RData")
+  save(dt, file="./Data/DT.RData")
+  ifrm(movies)
+} else
+{
+  load("./Data/Validation.RData")
+  load("./Data/DT.RData")
+}
+```
+
+
+```{r data_discovery, include = FALSE}
+head(dt)
+
+# Question: Can we 
+cor(dt$gross, dt$imdb_score)
+plot(dt$gross,dt$imdb_score)
+```
+#Main goal
+estimate success of movie based on IMDB data
+##Problems
+### Measure of success
+Success can be measured by gross revenues (which can only be estimated) or IMDB / (rotten tomateo etc) score. Are they broadly equivalent?
+```{r success_measure}
+lm = lm(gross ~ imdb_score, data=dt)
+summary(lm)$r.squared
+
+plot(dt$gross,dt$imdb_score)
+cor(dt$gross, dt$imdb_score)
+ifrm(lm)
+```
+As expected, there is correlation between revenues and IMDB score, but only `r summary(lm)$r.squared*100`% of the variance. We will therefore try to predict the IMDB score first, and then see how our prediction predicts gross revenue.
+
+```{r data_shaping}
+
+getGAMLRInputs = function(data, mode="train", vectorizer=NULL)
+{
+  # Prepares NLP
+  prep_fun = tolower
+  tok_fun = word_tokenizer
+  
+  it = itoken(data$plot_keywords, 
+                  preprocessor = prep_fun, 
+                  tokenizer = tok_fun, 
+                  ids = data$PIK, 
+                  progressbar = FALSE)
+  vocab = create_vocabulary(it)
+  
+  if(mode == "train")
+  {
+    vectorizer = vocab_vectorizer(vocab)
+  }
+  
+  dtm = create_dtm(it, vectorizer)
+  data$plot_keywords = NULL
+
+  #Build model
+  filter = c("movie_imdb_link","movie_title")
+   
+  notneeded = data[, ..filter]
+  data = data[, -filter, with=FALSE]
+  data.sparse = sparse.model.matrix(gross ~ ., data=data[,-c("PIK"),with=FALSE])
+  row.names(data.sparse) = data$PIK
+  
+  colnames(data.sparse)=paste0("model_",colnames(data.sparse))
+    
+  #Merges
+  X = cbind(data.sparse,dtm)
+  colnames(X) = c(colnames(data.sparse),colnames(dtm))
+  
+  Y = data$gross
+
+  return(list(x=X, y=Y, vectorizer=vectorizer))
+}
+```
+
+```{r InSample}
+if(!file.exists("./Data/ISmatrix.RData"))
+{
+  dt[, plot_keywords:=as.character(plot_keywords)]
+  
+  xy.train = getGAMLRInputs(dt, "train", NULL)
+  save(xy.train, file="./Data/ISmatrix.RData")
+} else
+{
+  load("./Data/ISmatrix.RData")
+}
+ifrm(dt)
+```
+
+```{r regressionModels}
+X = xy.train$x
+Y = xy.train$y
+
+ifrm(xy.train)
+
+## OLS for benchmark
+if(!file.exists("./Data/OLS.RData"))
+{
+  model.ols = glm(Y~X)
+  save(model.ols, file="./Data/OLS.RData")
+  ifrm(model.ols)
+}else
+{
+  load("./Data/OLS.RData")
+}
+
+## LASSO
+if(!file.exists("./Data/LASSO.RData"))
+{
+  model.lasso = gamlr(X, Y)
+  save(model.lasso, file="./Data/LASSO.RData")
+}else
+{
+  load("./Data/LASSO.RData")
+}
+  plot(model.lasso)
+
+## Elastic Net
+if(!file.exists(paste0("./Data/ENet",NFolds,"_",1/alpha_incr,".RData")))
+{
+  set.seed(1999)
+  alpha_seq = seq(0, 1, by = alpha_incr)
+  
+  # Creates N folds
+  folds = sample(1:NFolds, nrow(X), replace = TRUE)
+  
+  # Output table
+  L = length(alpha_seq)
+  rmse_DT = data.table(alpha         = alpha_seq,
+                       mean_cv_error = rep(0, L))
+  for (i in 1:L) {
+    cv_i = cv.glmnet(x = unlist(X), y = Y, alpha = rmse_DT[i, alpha], foldid = folds)
+    rmse_DT[i, mean_cv_error := min(cv_i$cvm)]
+    cat("Iteration", i, "cv_error:", min(cv_i$cvm), "\n")
+  }
+    
+  # optimal alpha
+  index_min = which.min(rmse_DT$mean_cv_error)
+  opt_alpha = rmse_DT[index_min, alpha]
+    
+  # re-runs the elastic net with that alpha
+  model.elnet = cv.glmnet(x = X, y = Y, alpha = opt_alpha)
+  save(model.elnet, file=paste0("./Data/ENet",NFolds,"_",1/alpha_incr,".RData"))
+}else
+{
+  load(paste0("./Data/ENet",NFolds,"_",1/alpha_incr,".RData"))
+}
+plot(model.elnet)
+  
+## Random Forest
+if(!file.exists(paste0("./Data/RanFo",NFolds,"_",num_trees,".RData")))
+{
+  X_Yrf = as.matrix(X)
+  X_Yrf = cbind(X,Y)
+  dim(as.matrix(X))
+  dim(as.matrix(Y))
+  dim(Y)
+  
+  X_Yrf = Matrix(X_Yrf, sparse=FALSE)
+  
+  X_Yrf = data.frame(as.matrix(X))
+  X_Yrf$Y = Y
+  
+  model.ranfo = ranger(Y~., data=X_Yrf
+                       num.trees = num_trees,
+  #                    importance = "impurity",
+                       seed = 1776)
+  save(model.ranfo, file=paste0("./Data/RanFo",NFolds,"_",num_trees,".RData"))
+}else
+{
+  load(paste0("./Data/RanFo",NFolds,"_",num_trees,".RData"))
+} 
+plot(model.ranFo)
+
+## Elastic Net + Random Forest
+# if(!file.exists(paste0("./Data/ImprRanFo",NFolds,"_",num_trees,".RData")))
+# {
+#     model.elnet
+#     ######## TODO
+#     model.ranfo = ranger(Y ~ unlist(X),
+#                 num.trees = num_trees,
+#   #             importance = "impurity",
+#                 seed = 1776)
+#   save(model.ranfo, file=paste0("./Data/ImprRanFo",NFolds,"_",num_trees,".RData"))
+# }else
+# {
+#   load(paste0("./Data/ImprRanFo",NFolds,"_",num_trees,".RData"))
+# } 
+```
+
+```{r OS}
+# Out of sample validation
+if(!file.exists("./Data/OSmatrix.RData"))
+{
+  validation[, plot_keywords:=as.character(plot_keywords)]
+  xy.valid = getGAMLRInputs(validation, "validation", xy.train$vectorizer)
+  save(xy.valid, file="./Data/OSmatrix.RData")
+} else
+{
+  load("./Data/OSmatrix.RData")
+}
+
+X_train = xy.valid$x
+Y_train = xy.valid$Y
+
+## OLS
+#predict.ols = predict(model.ols,newdata=unlist(((xy.valid$x_merged)[, -c("PIK")])),type='response')
+
+## LASSO
+predict.lasso = predict(model.lasso,newdata=X_train,type='response')
+
+## Elastic Net
+predict.elnet = predict(model.elnet,newdata=X_train,type='response')
+
+## Random Forest
+predict.ranfo = predict(model.ranfo,newdata=X_train,type='response')
+
+## Elastic Net + Random Forest
+predict.imprranfo = predict(model.imprranfo,newdata=X_train,type='response')
+
+## Plot results
+
+perf = rbindlist(list( data.table(y_gross = Y_train, 
+                                 name="LASSO", 
+                                 predict=predict.lasso[,1],
+                                 error=predict.lasso[,1]-Y_train),
+                       data.table(y_gross = Y_train, 
+                                 name="Random Forest", 
+                                 predict=predict.ranfo[,1],
+                                 error=predict.ranfo[,1]-Y_train)))
+
+perf = rbindlist(list(data.table(y_gross = Y_train, 
+                                 name="OLS", 
+                                 predict=predict.ols[,1],
+                                 error=predict.ols[,1]-Y_train),
+                      data.table(y_gross = Y_train, 
+                                 name="LASSO", 
+                                 predict=predict.lasso[,1],
+                                 error=predict.lasso[,1]-Y_train),
+                      data.table(y_gross = Y_train, 
+                                 name="Elastic Net", 
+                                 predict=predict.elnet[,1],
+                                 error=predict.elnet[,1]-Y_train),
+                      data.table(y_gross = Y_train, 
+                                 name="Random Forest", 
+                                 predict=predict.ranfo[,1],
+                                 error=predict.ranfo[,1]-Y_train)))
+ggplot(perf)+
+  aes(x=y_gross, y=predict)+
+  geom_point(size=0.2)+
+  geom_smooth(span = 0.5)+
+  geom_abline(mapping=aes(slope=1, intercept=0)) +
+  facet_wrap(~name)
+
+
+## Calculate RMSE for different models
+#LASSO_rmse = sqrt(sum(perf$lasso_gross_error^2)/length(perf))
+
+
+# One potential concern is multi-collinearity e.g., budget depends on the actors and director; similarly the number of facebook likes is indicator of the popularity of the actor / director 
+
+# Another concern is the number of critic for reviews: intuitively it is closer to a measure of how reliable the IMDB rating is, than the quality of the movie. => model will probably not use it as a variable, but maybe we should consider it as we compare our prediction with the IMDB rating.
+```
